@@ -14,6 +14,15 @@ const OVERLAY_NAME = 'Lunar processed heatmap surface';
 const SURFACE_SCALE = 1.003;
 const BRUSH_RADIUS = 12;
 const EDGE_FADE_START = 490;
+const LUNAR_CYCLE_DAYS = 29.53;
+const SLIDER_CYCLE_DAYS = 29.5;
+const CYCLE_ANIMATION_MS = 60_000;
+const PLAYBACK_FRAME_MS = 1000 / 12;
+const SITE_PRESETS = [
+    { id: 'shackleton', name: 'Shackleton Crater', lat: -90.0, lon: 0.0, color: '#ff6678' },
+    { id: 'connecting-ridge', name: 'Connecting Ridge', lat: -89.4, lon: 137.4, color: '#47e6ff' },
+    { id: 'malapert', name: 'Malapert Massif', lat: -86.0, lon: 0.0, color: '#ffd34f' },
+];
 
 let activeMode = document.querySelector('.control-btn.active')?.dataset.mode || 'sunlight';
 let datasetsPromise;
@@ -24,6 +33,21 @@ let texture;
 let canvasContext;
 let legend;
 let maxColatitudeRad;
+let sunMarker;
+let sitePins = [];
+let selectedSite = null;
+let selectedLunarDay = null;
+let playbackFrame = null;
+let lastPlaybackPaint = 0;
+
+const timescalePanel = document.getElementById('solar-timescale');
+const daySlider = document.getElementById('lunar-day-slider');
+const dayLabel = document.getElementById('lunar-day-label');
+const phaseLabel = document.getElementById('lunar-cycle-phase');
+const azimuthLabel = document.getElementById('solar-azimuth-label');
+const playButton = document.getElementById('lunar-cycle-play');
+const cycleState = document.getElementById('solar-cycle-state');
+const siteCard = document.getElementById('site-comparison-card');
 
 async function loadDataset(mode) {
     const response = await fetch(mode.dataUrl);
@@ -42,7 +66,30 @@ function loadDatasets() {
     if (!datasetsPromise) {
         datasetsPromise = Promise.all(Object.values(MODES).map(async mode =>
             [mode.key, await loadDataset(mode)]))
-            .then(entries => Object.fromEntries(entries));
+            .then(entries => {
+                const datasets = Object.fromEntries(entries);
+                const illuminationByCoordinate = new Map(datasets.sunlight.map(point =>
+                    [`${point.lat},${point.lon}`, point.illumination_pct ?? point.value]));
+                // The static solar layer remains unchanged; attach the matching
+                // illumination sample for the optional Solar Energy timescale.
+                datasets.solar = datasets.solar.map(point => ({
+                    ...point,
+                    illumination_pct: illuminationByCoordinate.get(`${point.lat},${point.lon}`) ?? 0,
+                }));
+                const terrainByCoordinate = new Map(datasets.terrain.map(point =>
+                    [`${point.lat},${point.lon}`, point]));
+                const solarByCoordinate = new Map(datasets.solar.map(point =>
+                    [`${point.lat},${point.lon}`, point]));
+                datasets.samplesByCoordinate = new Map(datasets.sunlight.map(point => {
+                    const key = `${point.lat},${point.lon}`;
+                    return [key, {
+                        sunlight: point,
+                        terrain: terrainByCoordinate.get(key),
+                        solar: solarByCoordinate.get(key),
+                    }];
+                }));
+                return datasets;
+            });
     }
     return datasetsPromise;
 }
@@ -92,7 +139,24 @@ function measureWorldSphere(moonRoot) {
     return sphere;
 }
 
+function frameFromMain({ northAxis, lonA, lonB, lonSign = 1, centerLon = 0 }) {
+    const center = THREE.MathUtils.degToRad(centerLon);
+    const xAxis = new THREE.Vector3()
+        .addScaledVector(lonA, Math.cos(center))
+        .addScaledVector(lonB, -lonSign * Math.sin(center));
+    const zAxis = new THREE.Vector3()
+        .addScaledVector(lonA, Math.sin(center))
+        .addScaledVector(lonB, lonSign * Math.cos(center));
+    const southAxis = northAxis.clone().negate();
+    if (new THREE.Vector3().crossVectors(xAxis, southAxis).dot(zAxis) < 0) zAxis.negate();
+    return new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(xAxis, southAxis, zAxis));
+}
+
 function uvDirectionFrame(moonRoot, center) {
+    // Prefer the axes used by the Moon's landmarks; the fallback below is for
+    // standalone use without main.js and preserves the existing polar cap.
+    if (window.lunarFrame) return frameFromMain(window.lunarFrame);
     moonRoot.updateWorldMatrix(true, true);
     const meshes = [];
     let minV = Infinity;
@@ -284,7 +348,7 @@ function drawSpot(x, y, rgb) {
     canvasContext.fill();
 }
 
-function paintDataset(mode, points) {
+function paintDataset(mode, points, logPaint = true) {
     canvasContext.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
     let observedMin = Infinity;
     let observedMax = -Infinity;
@@ -317,8 +381,271 @@ function paintDataset(mode, points) {
 
     texture.needsUpdate = true;
     updateLegend(mode, observedMin, observedMax, points.length);
-    console.info(`Heatmap ${mode.key}: painted ${points.length.toLocaleString()} JSON locations (${observedMin.toFixed(3)}–${observedMax.toFixed(3)} ${mode.unit}).`);
+    if (logPaint) {
+        console.info(`Heatmap ${mode.key}: painted ${points.length.toLocaleString()} JSON locations (${observedMin.toFixed(3)}–${observedMax.toFixed(3)} ${mode.unit}).`);
+    }
 }
+
+function instantaneousSolarEnergy(point, day = selectedLunarDay) {
+    if (day === null) return point.value;
+    const p = point.illumination_pct / 100;
+    if (p < 0.05) return 0;
+    const sunLon = (day / LUNAR_CYCLE_DAYS) * 360 - 180;
+    const alignment = Math.cos((point.lon - sunLon) * Math.PI / 180);
+    // The static product is average yield (peak yield × persistence).
+    // Dividing by persistence recovers the local clear-sun peak yield.
+    const peakYield = point.value / p;
+    if (p > 0.80) {
+        // High peaks retain 75–100% even on the far side of the cycle.
+        return peakYield * (0.75 + 0.25 * ((alignment + 1) / 2));
+    }
+    return peakYield * Math.max(0, alignment);
+}
+
+function instantaneousSolarPoints(basePoints, day) {
+    return basePoints.map(point => ({ ...point, value: instantaneousSolarEnergy(point, day) }));
+}
+
+function updateSunMarker(day = selectedLunarDay) {
+    if (!sunMarker) return;
+    sunMarker.visible = activeMode === 'solar' && day !== null;
+    if (!sunMarker.visible) return;
+    const sunLon = (day / LUNAR_CYCLE_DAYS) * 360 - 180;
+    const lonRad = sunLon * Math.PI / 180;
+    const normal = new THREE.Vector3(
+        Math.sin(maxColatitudeRad) * Math.cos(lonRad),
+        Math.cos(maxColatitudeRad),
+        Math.sin(maxColatitudeRad) * Math.sin(lonRad),
+    );
+    sunMarker.position.copy(normal.multiplyScalar(sunMarker.userData.surfaceRadius * 1.009));
+}
+
+function angularDistanceDegrees(latA, lonA, latB, lonB) {
+    const a = THREE.MathUtils.degToRad(latA);
+    const b = THREE.MathUtils.degToRad(latB);
+    const dLon = THREE.MathUtils.degToRad(lonA - lonB);
+    const cosine = Math.sin(a) * Math.sin(b) + Math.cos(a) * Math.cos(b) * Math.cos(dLon);
+    return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(cosine, -1, 1)));
+}
+
+function directToEarthStatus(lon) {
+    const absoluteLongitude = Math.abs(lon);
+    if (absoluteLongitude <= 82) return 'Direct-to-Earth: Continuous Line-of-Sight';
+    if (absoluteLongitude <= 98) return 'Direct-to-Earth: Intermittent (Lunar Libration Zone)';
+    return 'No Direct Earth View (Lunar Relay Satellite Required)';
+}
+
+function nearestLocation(points, lat, lon) {
+    let nearest = null;
+    let nearestDistance = Infinity;
+    for (const point of points) {
+        const distance = angularDistanceDegrees(lat, lon, point.lat, point.lon);
+        if (distance < nearestDistance) {
+            nearest = point;
+            nearestDistance = distance;
+        }
+    }
+    return nearest;
+}
+
+function renderSelectedSite(datasets) {
+    if (!selectedSite) return;
+    const sampled = nearestLocation(datasets.sunlight, selectedSite.lat, selectedSite.lon);
+    if (!sampled) return;
+    const sampleKey = `${sampled.lat},${sampled.lon}`;
+    const sample = datasets.samplesByCoordinate.get(sampleKey);
+    if (!sample?.terrain || !sample?.solar) return;
+
+    document.getElementById('site-card-title').textContent = selectedSite.name;
+    document.getElementById('site-card-coordinates').textContent =
+        `LAT ${selectedSite.lat.toFixed(4)}° · LON ${selectedSite.lon.toFixed(4)}°`;
+    document.getElementById('site-card-slope').textContent =
+        `${(sample.terrain.slope_degrees ?? sample.terrain.value).toFixed(2)}°`;
+    document.getElementById('site-card-sunlight').textContent =
+        `${(sample.sunlight.illumination_pct ?? sample.sunlight.value).toFixed(1)}%`;
+    document.getElementById('site-card-solar').textContent =
+        `${instantaneousSolarEnergy(sample.solar).toFixed(2)} kWh/m²/day`;
+    document.getElementById('site-card-comms').textContent = directToEarthStatus(selectedSite.lon);
+    siteCard.hidden = false;
+}
+
+function handleLocationSelection(location) {
+    const preset = SITE_PRESETS
+        .map(site => ({ site, distance: angularDistanceDegrees(location.lat, location.lon, site.lat, site.lon) }))
+        .sort((a, b) => a.distance - b.distance)[0];
+    const selectedPreset = SITE_PRESETS.find(site => site.id === location.presetId)
+        || (preset?.distance <= 0.4 ? preset.site : null);
+    selectedSite = selectedPreset
+        ? { ...selectedPreset }
+        : { name: 'Selected Location', lat: location.lat, lon: location.lon };
+
+    for (const pin of sitePins) {
+        const isSelected = pin.userData.site.id === selectedPreset?.id;
+        pin.scale.setScalar(isSelected ? 1.55 : 1);
+        for (const material of pin.userData.materials) {
+            material.color.set(isSelected ? '#ffffff' : pin.userData.site.color);
+        }
+    }
+
+    void loadDatasets().then(renderSelectedSite)
+        .catch(error => console.error('Could not load selected lunar site values:', error));
+}
+
+function addSitePins(surfaceRadius) {
+    sitePins = SITE_PRESETS.map(site => {
+        const colatitude = THREE.MathUtils.degToRad(90 - Math.abs(site.lat));
+        const longitude = THREE.MathUtils.degToRad(site.lon);
+        const normal = new THREE.Vector3(
+            Math.sin(colatitude) * Math.cos(longitude),
+            Math.cos(colatitude),
+            Math.sin(colatitude) * Math.sin(longitude),
+        );
+        const pin = new THREE.Group();
+        pin.name = `Landing site pin: ${site.name}`;
+        pin.position.copy(normal).multiplyScalar(surfaceRadius * 1.006);
+        pin.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+
+        const material = new THREE.MeshBasicMaterial({
+            color: site.color,
+            toneMapped: false,
+            depthTest: false,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+        });
+        const dot = new THREE.Mesh(
+            new THREE.SphereGeometry(surfaceRadius * 0.013, 16, 12),
+            material,
+        );
+        dot.position.z = surfaceRadius * 0.012;
+        dot.renderOrder = 1002;
+        const halo = new THREE.Mesh(
+            new THREE.TorusGeometry(surfaceRadius * 0.026, surfaceRadius * 0.004, 8, 28),
+            material.clone(),
+        );
+        halo.position.z = surfaceRadius * 0.009;
+        halo.renderOrder = 1002;
+        pin.add(dot, halo);
+        pin.userData.site = site;
+        pin.userData.materials = [material, halo.material];
+        pin.renderOrder = 1002;
+        overlay.add(pin);
+        return pin;
+    });
+}
+
+function displayPoints(mode, datasets) {
+    if (mode.key === 'solar' && selectedLunarDay !== null) {
+        return instantaneousSolarPoints(datasets.solar, selectedLunarDay);
+    }
+    return datasets[mode.key];
+}
+
+function updateTimescaleLabels(day) {
+    if (day === null) {
+        dayLabel.textContent = 'Monthly Average · static';
+        phaseLabel.textContent = 'NASA MEAN';
+        azimuthLabel.textContent = '—';
+        cycleState.textContent = 'MONTHLY AVERAGE';
+        cycleState.classList.remove('live');
+        return;
+    }
+    const sunLon = (day / LUNAR_CYCLE_DAYS) * 360 - 180;
+    const azimuth = ((sunLon + 180) % 360 + 360) % 360;
+    const phases = ['NEW MOON', 'WAXING CRESCENT', 'FIRST QUARTER', 'WAXING GIBBOUS',
+        'FULL MOON', 'WANING GIBBOUS', 'LAST QUARTER', 'WANING CRESCENT'];
+    const phase = Math.floor((day / LUNAR_CYCLE_DAYS) * phases.length + 0.5) % phases.length;
+    dayLabel.textContent = `Lunar Day ${day.toFixed(1)} / ${SLIDER_CYCLE_DAYS.toFixed(1)}`;
+    phaseLabel.textContent = phases[phase];
+    azimuthLabel.textContent = `${azimuth.toFixed(0)}°`;
+    cycleState.textContent = 'LIVE LUNAR CYCLE';
+    cycleState.classList.add('live');
+}
+
+function refreshSolarDisplay() {
+    if (activeMode !== 'solar') return;
+    void loadDatasets().then(datasets => {
+        if (activeMode !== 'solar') return;
+        const points = displayPoints(MODES.solar, datasets);
+        renderSummary(MODES.solar, points);
+        renderSelectedSite(datasets);
+        if (overlay) paintDataset(MODES.solar, points, false);
+    }).catch(error => console.error('Could not update lunar-cycle solar data:', error));
+}
+
+function stopCycleAnimation() {
+    if (playbackFrame !== null) cancelAnimationFrame(playbackFrame);
+    playbackFrame = null;
+    playButton.textContent = 'Play';
+    playButton.setAttribute('aria-pressed', 'false');
+    playButton.classList.remove('on');
+}
+
+function startCycleAnimation() {
+    if (activeMode !== 'solar' || playbackFrame !== null) return;
+    if (selectedLunarDay === null) selectedLunarDay = Number(daySlider.value);
+    const startDay = selectedLunarDay;
+    const startTime = performance.now();
+    lastPlaybackPaint = 0;
+    playButton.textContent = 'Pause';
+    playButton.setAttribute('aria-pressed', 'true');
+    playButton.classList.add('on');
+
+    const animate = now => {
+        if (activeMode !== 'solar') {
+            stopCycleAnimation();
+            return;
+        }
+        const elapsed = now - startTime;
+        selectedLunarDay = (startDay + (elapsed / CYCLE_ANIMATION_MS) * SLIDER_CYCLE_DAYS) % SLIDER_CYCLE_DAYS;
+        daySlider.value = selectedLunarDay.toFixed(1);
+        updateTimescaleLabels(selectedLunarDay);
+        updateSunMarker(selectedLunarDay);
+        window.setLunarSunDay?.(selectedLunarDay);
+        if (now - lastPlaybackPaint >= PLAYBACK_FRAME_MS) {
+            lastPlaybackPaint = now;
+            refreshSolarDisplay();
+        }
+        playbackFrame = requestAnimationFrame(animate);
+    };
+    playbackFrame = requestAnimationFrame(animate);
+}
+
+function setSolarControlsVisible(visible) {
+    timescalePanel.hidden = !visible;
+    if (!visible) {
+        stopCycleAnimation();
+        window.setLunarSunDay?.(null);
+    } else if (selectedLunarDay !== null) {
+        window.setLunarSunDay?.(selectedLunarDay);
+    }
+    updateSunMarker();
+}
+
+daySlider.addEventListener('input', () => {
+    selectedLunarDay = Number(daySlider.value);
+    updateTimescaleLabels(selectedLunarDay);
+    updateSunMarker(selectedLunarDay);
+    window.setLunarSunDay?.(selectedLunarDay);
+    refreshSolarDisplay();
+});
+
+playButton.addEventListener('click', () => {
+    if (playbackFrame === null) startCycleAnimation();
+    else stopCycleAnimation();
+});
+
+document.getElementById('lunar-cycle-average').addEventListener('click', () => {
+    stopCycleAnimation();
+    selectedLunarDay = null;
+    daySlider.value = '0';
+    updateTimescaleLabels(null);
+    updateSunMarker(null);
+    window.setLunarSunDay?.(null);
+    refreshSolarDisplay();
+});
+
+setSolarControlsVisible(activeMode === 'solar');
+updateTimescaleLabels(null);
 
 function createCanvasTexture() {
     const canvas = document.createElement('canvas');
@@ -397,8 +724,24 @@ async function attachHeatmap(scene) {
         overlay.visible = true;
         overlay.renderOrder = 999;
         scene.add(overlay);
-        paintDataset(MODES[activeMode], datasets[activeMode]);
-        renderSummary(MODES[activeMode], datasets[activeMode]);
+        sunMarker = new THREE.Mesh(
+            new THREE.SphereGeometry(surfaceRadius * 0.012, 16, 12),
+            new THREE.MeshBasicMaterial({
+                color: '#ffd44a',
+                toneMapped: false,
+                depthTest: false,
+                depthWrite: false,
+            }),
+        );
+        sunMarker.name = 'Lunar solar azimuth marker';
+        sunMarker.userData.surfaceRadius = surfaceRadius;
+        sunMarker.renderOrder = 1000;
+        overlay.add(sunMarker);
+        addSitePins(surfaceRadius);
+        updateSunMarker();
+        const points = displayPoints(MODES[activeMode], datasets);
+        paintDataset(MODES[activeMode], points);
+        renderSummary(MODES[activeMode], points);
         console.info(`Moon world sphere radius: ${sphere.radius.toFixed(6)}; heatmap cap radius: ${surfaceRadius.toFixed(6)} (${SURFACE_SCALE.toFixed(3)}×); cap colatitude: ${(maxColatitudeRad * 180 / Math.PI).toFixed(3)}°.`);
     })().finally(() => { attachPromise = null; });
     return attachPromise;
@@ -407,6 +750,14 @@ async function attachHeatmap(scene) {
 function scheduleAttach(scene) {
     void attachHeatmap(scene).catch(error => console.error('Moon surface heatmap could not be loaded:', error));
 }
+
+window.addEventListener('lunar-location-selected', event => {
+    handleLocationSelection(event.detail);
+});
+
+document.getElementById('site-card-close').addEventListener('click', () => {
+    siteCard.hidden = true;
+});
 
 const originalAdd = THREE.Object3D.prototype.add;
 THREE.Object3D.prototype.add = function addWithSurfaceHeatmap(...objects) {
@@ -418,13 +769,21 @@ THREE.Object3D.prototype.add = function addWithSurfaceHeatmap(...objects) {
 document.querySelectorAll('.control-btn').forEach(button => {
     button.addEventListener('click', () => {
         activeMode = button.dataset.mode;
-        loadDatasets().then(datasets => renderSummary(MODES[activeMode], datasets[activeMode]))
-            .catch(error => console.error('Could not calculate lunar dataset summary:', error));
+        if (activeMode === 'solar' && selectedLunarDay === null) selectedLunarDay = 0;
+        setSolarControlsVisible(activeMode === 'solar');
+        updateTimescaleLabels(selectedLunarDay);
         if (!overlay) {
             if (sceneRef) scheduleAttach(sceneRef);
+            loadDatasets().then(datasets => renderSummary(MODES[activeMode], displayPoints(MODES[activeMode], datasets)))
+                .catch(error => console.error('Could not calculate lunar dataset summary:', error));
             return;
         }
-        loadDatasets().then(datasets => paintDataset(MODES[activeMode], datasets[activeMode]))
+        loadDatasets().then(datasets => {
+            if (activeMode !== button.dataset.mode) return;
+            const points = displayPoints(MODES[activeMode], datasets);
+            paintDataset(MODES[activeMode], points);
+            renderSummary(MODES[activeMode], points);
+        })
             .catch(error => console.error('Could not switch lunar heatmap dataset:', error));
     });
 });

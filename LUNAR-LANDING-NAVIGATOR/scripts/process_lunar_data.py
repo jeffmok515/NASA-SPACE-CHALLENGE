@@ -28,7 +28,10 @@ MOON_RADIUS_M = 1_737_400.0
 SOLAR_CONSTANT_W_M2 = 1361.0
 PANEL_EFFICIENCY = 0.20
 OUTPUT_SIZE = 150
-REGION_HALF_WIDTH_M = 90_000.0
+# A stereographic radius of about 304 km corresponds to 80°S on the Moon.
+# Using it as the half-width of the square includes that latitude at every
+# longitude; the output mask clips the square corners back to the 80°S circle.
+REGION_HALF_WIDTH_M = 304_000.0
 
 ILLUMINATION_CANDIDATES = (
     RAW_DIR / "sunlight.tif",

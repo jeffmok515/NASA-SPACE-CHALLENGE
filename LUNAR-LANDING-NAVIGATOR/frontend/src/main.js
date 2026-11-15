@@ -218,7 +218,7 @@ loader.load(
         const SHOW_DEBUG_AXES = false;   // true = also show X/Y/Z axes
 
         // --- Calibration knobs (only touch if landmarks look wrong) ---
-        const FLIP_NORTH_SOUTH = false;  // true = swap which pole is north
+        const FLIP_NORTH_SOUTH = true;   // calibrated against the Moon texture and South Pole landmarks
         const MAP_CENTER_LON   = 0;      // longitude at the centre of the texture
         const LONGITUDE_SIGN   = 1;      // -1 = east/west appear swapped
 
@@ -318,6 +318,32 @@ loader.load(
 
         const lonA = flatten(vertexAtUV(0.5,  vMid));   // map centre
         const lonB = flatten(vertexAtUV(0.75, vMid));   // a quarter turn further
+
+        // Share the same calibrated axes with the heatmap so it follows this
+        // model's true South Pole and longitude convention exactly.
+        window.lunarFrame = {
+            northAxis: northAxis.clone(),
+            lonA: lonA.clone(),
+            lonB: lonB.clone(),
+            lonSign: LONGITUDE_SIGN,
+            centerLon: MAP_CENTER_LON,
+        };
+        const defaultSunPosition = directionalLight.position.clone();
+        window.setLunarSunDay = day => {
+            if (!Number.isFinite(day)) {
+                directionalLight.position.copy(defaultSunPosition);
+                return;
+            }
+            const sunLon = (day / 29.53) * 360 - 180;
+            const sunLat = THREE.MathUtils.degToRad(-1.0);
+            const sunLonRad = THREE.MathUtils.degToRad((sunLon - MAP_CENTER_LON) * LONGITUDE_SIGN);
+            const direction = new THREE.Vector3()
+                .addScaledVector(lonA, Math.cos(sunLat) * Math.cos(sunLonRad))
+                .addScaledVector(lonB, Math.cos(sunLat) * Math.sin(sunLonRad))
+                .addScaledVector(northAxis, Math.sin(sunLat))
+                .transformDirection(pivot.matrixWorld);
+            directionalLight.position.copy(direction.multiplyScalar(20));
+        };
 
         // On a correct moon: north x lon0 = east. Negative means the map or
         // the poles are mirrored; flip FLIP_NORTH_SOUTH or LONGITUDE_SIGN.
@@ -701,6 +727,52 @@ loader.load(
         }
 
         scene.add(pivot);
+
+        let surfacePointerStart = null;
+        renderer.domElement.addEventListener('pointerdown', event => {
+            surfacePointerStart = { id: event.pointerId, x: event.clientX, y: event.clientY };
+        });
+        window.addEventListener('pointerup', event => {
+            const start = surfacePointerStart;
+            surfacePointerStart = null;
+            if (!start || start.id !== event.pointerId
+                || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) return;
+
+            const rect = renderer.domElement.getBoundingClientRect();
+            const pointer = new THREE.Vector2(
+                ((event.clientX - rect.left) / rect.width) * 2 - 1,
+                -((event.clientY - rect.top) / rect.height) * 2 + 1,
+            );
+            raycaster.setFromCamera(pointer, camera);
+            const heatmap = scene.children.find(child => child.name === 'Lunar processed heatmap surface');
+            const pinMeshes = [];
+            heatmap?.traverse(child => {
+                if (child.isMesh && child.parent?.name.startsWith('Landing site pin:')) pinMeshes.push(child);
+            });
+            const pinHit = pinMeshes.length ? raycaster.intersectObjects(pinMeshes, false)[0] : null;
+            if (pinHit) {
+                const site = pinHit.object.parent.userData.site;
+                window.dispatchEvent(new CustomEvent('lunar-location-selected', {
+                    detail: { lat: site.lat, lon: site.lon, presetId: site.id },
+                }));
+                return;
+            }
+            const hit = raycaster.intersectObject(moon, true)[0];
+            if (!hit) return;
+
+            const direction = pivot.worldToLocal(hit.point.clone()).normalize();
+            const latitude = THREE.MathUtils.radToDeg(Math.asin(
+                THREE.MathUtils.clamp(direction.dot(northAxis), -1, 1),
+            ));
+            if (latitude > -80) return;
+            let longitude = MAP_CENTER_LON + THREE.MathUtils.radToDeg(
+                Math.atan2(direction.dot(lonB), direction.dot(lonA)) / LONGITUDE_SIGN,
+            );
+            longitude = ((longitude + 180) % 360 + 360) % 360 - 180;
+            window.dispatchEvent(new CustomEvent('lunar-location-selected', {
+                detail: { lat: latitude, lon: longitude },
+            }));
+        });
 
         console.log('Moon loaded successfully!');
         console.log('South pole marker added!');

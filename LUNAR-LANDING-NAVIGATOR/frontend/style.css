@@ -149,6 +149,24 @@ canvas { display: block; width: 100%; height: 100%; }
 .heatmap-legend .labels { display: flex; justify-content: space-between; color: #cfeeff; }
 .heatmap-legend small { display: block; margin-top: 5px; color: #9fb5d1; }
 
+.site-card[hidden] { display: none; }
+.site-card {
+    position: fixed; right: 26px; bottom: 220px; z-index: 21; width: min(290px, calc(100vw - 32px));
+    padding: 13px 15px; color: #e9f3ff; background: rgba(4, 10, 24, .94);
+    border: 1px solid rgba(130, 190, 255, .48); border-radius: 6px;
+    font: 11px/1.45 var(--mono); letter-spacing: .03em; box-shadow: 0 6px 24px rgba(0,0,0,.4);
+}
+.site-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.site-card-heading strong { color: var(--cyan); letter-spacing: .12em; }
+.site-card-heading button { border: 0; color: #a9c9df; background: transparent; font-size: 20px; cursor: pointer; }
+.site-coordinates { margin: 5px 0 10px; color: #a9c9df; }
+.site-card dl { display: grid; gap: 7px; margin: 0; }
+.site-card dl > div { display: flex; justify-content: space-between; gap: 10px; }
+.site-card dt { color: var(--muted); }
+.site-card dd { margin: 0; color: var(--cyan); text-align: right; }
+.site-card .comms { display: grid; }
+.site-card .comms dd { color: #ffe28a; text-align: left; }
+
 /* ---------- MODULE INFO ---------- */
 .module-info h3 { font-family: var(--display); font-size: 18px; letter-spacing: 3px; color: var(--cyan); margin: 6px 0 8px; text-shadow: 0 0 12px rgba(61,230,255,.5); }
 .module-info > p:not(.section-label) { font-size: 12px; line-height: 1.7; color: #9cc3da; min-height: 40px; }
@@ -156,6 +174,28 @@ canvas { display: block; width: 100%; height: 100%; }
 .readout { margin-top: 14px; display: grid; gap: 10px; }
 .readout .row { display: grid; gap: 4px; font-size: 10px; letter-spacing: 1.2px; color: var(--muted); }
 .readout .row b { color: var(--cyan); font-size: 12px; line-height: 1.45; font-weight: 400; letter-spacing: .04em; overflow-wrap: anywhere; }
+.solar-timescale[hidden] { display: none; }
+.solar-timescale {
+    position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%); z-index: 30;
+    box-sizing: border-box; width: min(400px, calc(100vw - 32px)); padding: 12px 16px 14px;
+    color: #cfeaf5; background: rgba(5,12,28,.9); border: 1px solid rgba(77,232,255,.38);
+    border-radius: 10px; backdrop-filter: blur(7px); box-shadow: 0 8px 28px rgba(0,0,0,.42);
+    font-family: var(--mono); user-select: none;
+}
+.solar-control-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.solar-control-title { color: var(--cyan); font: 11px var(--display); letter-spacing: .22em; }
+.solar-control-state { color: #7fa6b8; font-size: 10px; letter-spacing: .12em; text-align: right; }
+.solar-control-state.live { color: #ffd338; }
+.solar-time-readout { display: flex; justify-content: space-between; gap: 12px; margin: 8px 0 2px; color: #fff; font: 12px/1.4 var(--display); }
+.solar-time-readout #lunar-cycle-phase { color: #7fa6b8; font: 10px/1.4 var(--mono); }
+.solar-time-sub { color: #7fa6b8; font-size: 10px; margin-bottom: 8px; }
+.solar-time-sub b { color: var(--cyan); font-weight: 400; }
+#lunar-day-slider { display: block; width: 100%; margin: 6px 0 10px; accent-color: var(--cyan); cursor: pointer; }
+.solar-time-buttons { display: flex; gap: 8px; }
+.solar-time-buttons button { flex: 1; min-width: 0; padding: 7px 8px; color: #cfeaf5; border: 1px solid rgba(77,232,255,.35); border-radius: 6px; background: rgba(77,232,255,.08); font: 10px var(--display); letter-spacing: .12em; cursor: pointer; }
+.solar-time-buttons button:hover { background: rgba(77,232,255,.2); }
+.solar-time-buttons button.on { background: rgba(77,232,255,.28); color: #fff; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 .status-line { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 16px; font-size: 10px; letter-spacing: 2px; color: var(--green); }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse 1.6s infinite; }
@@ -177,5 +217,6 @@ canvas { display: block; width: 100%; height: 100%; }
     .topbar .title { font-size: 13px; padding: 10px 28px; letter-spacing: 4px; }
     .topbar .left, .topbar .right { display: none; }
     .mission-panel { left: 12px; top: 64px; bottom: 50px; width: 250px; padding: 14px 12px; }
+    .site-card { right: 12px; bottom: 210px; width: min(280px, calc(100vw - 24px)); }
     .bottombar { display: none; }
 }
